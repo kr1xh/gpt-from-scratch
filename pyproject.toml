@@ -1,0 +1,25 @@
+[project]
+name = "scratchgpt"
+version = "0.0.1"
+description = "An autograd engine and a modern GPT written from scratch in NumPy, with measured experiments"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.26",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+# torch is only the reference the tests compare against; src/ never imports it
+dev = ["pytest>=8", "torch>=2.3"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
