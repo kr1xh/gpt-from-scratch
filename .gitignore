@@ -1,0 +1,22 @@
+# Datasets, checkpoints and run outputs never go in git (downloaded or regenerated)
+data/
+models/
+results/
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local tool state
+.omc/
+.claude/
