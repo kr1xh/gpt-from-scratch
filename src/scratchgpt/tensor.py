@@ -91,7 +91,8 @@ class Tensor:
             if g is None:
                 continue
             if not node._parents:  # a leaf: keep its gradient (added to, until zeroed)
-                node.grad = g if node.grad is None else node.grad + g
+                # its own writeable copy: ops pass one array to several inputs, and sum's is read-only
+                node.grad = np.array(g) if node.grad is None else node.grad + g
                 continue
             for parent, pg in zip(node._parents, node._backward(g)):
                 if parent.requires_grad and pg is not None:

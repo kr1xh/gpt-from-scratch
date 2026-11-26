@@ -222,3 +222,12 @@ def test_default_dtype_is_float32_but_float64_is_kept():
     f32 = Tensor(np.zeros(2, dtype=np.float32), requires_grad=True)
     (f32 * 2.0).sum().backward()
     assert (f32 * 2.0).data.dtype == np.float32 and f32.grad.dtype == np.float32
+
+
+def test_leaf_gradients_are_independent_writeable_arrays():
+    a = Tensor(np.ones(3), requires_grad=True)
+    b = Tensor(np.ones(3), requires_grad=True)
+    (a + b).sum().backward()  # add passes one array to both inputs; sum makes a read-only view
+    assert a.grad is not b.grad
+    a.grad *= 0.5  # optimizers and clipping update gradients in place
+    np.testing.assert_allclose(b.grad, [1.0, 1.0, 1.0])
