@@ -1,5 +1,6 @@
 """End to end on a tiny text: train writes metrics and a checkpoint, sample reads it back."""
 import json
+import math
 
 import numpy as np
 import pytest
@@ -201,3 +202,11 @@ def test_momentum_is_not_plain_sgd(tmp_path):
     momentum = run(tmp_path / "momentum", "--steps", "4", "--optimizer", "momentum")["train_loss"]
     # Nesterov momentum already looks ahead on the first update, so the runs part from step 1 on
     assert sgd[0] == momentum[0] and sgd[1:] != momentum[1:]
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")  # the overflow is the point
+def test_a_run_whose_loss_blows_up_stops_and_says_where(tmp_path):
+    metrics = run(tmp_path, "--steps", "50", "--optimizer", "sgd", "--lr", "1e6", "--grad-clip", "1e9")
+    assert metrics["diverged_at"] == len(metrics["train_loss"]) - 1 < 49
+    assert not math.isfinite(metrics["train_loss"][-1])
+    assert not math.isfinite(metrics["final"]["val_bits_per_byte"])

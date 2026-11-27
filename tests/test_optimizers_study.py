@@ -52,6 +52,15 @@ def test_one_row_per_run_and_a_summary_per_optimizer(tmp_path):
     assert (tmp_path / "docs" / "figures" / "optimizers.png").stat().st_size > 1000
 
 
+def test_a_run_that_diverged_is_never_the_best_and_makes_the_spread_infinite():
+    nan = float("nan")
+    runs = [{"name": "a", "optimizer": "sgd", "lr": lr, "val_bits_per_byte": score, "steps_to_target": None}
+            for lr, score in ((0.1, 3.1), (0.3, 2.9), (1.0, nan))]
+    (sgd,) = study.summarize(runs)
+    assert sgd["best_lr"] == 0.3 and sgd["best_bits_per_byte"] == 2.9
+    assert sgd["lr_spread"] == float("inf") and sgd["diverged"] == [1.0]
+
+
 def test_finished_runs_are_not_trained_again(tmp_path, monkeypatch):
     first = run(tmp_path)
     monkeypatch.setattr(train, "main", lambda *a: pytest.fail("a finished run was retrained"))

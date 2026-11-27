@@ -154,6 +154,10 @@ def main(argv=None) -> dict:
         for opt in opts:
             opt.step()
         metrics["train_loss"].append(loss.item())
+        if not np.isfinite(metrics["train_loss"][-1]):  # the weights are gone: every later step is NaN too
+            metrics["diverged_at"] = step
+            print(f"step {step:5d}  loss is {metrics['train_loss'][-1]}: stopping", flush=True)
+            break
 
         if step % args.eval_every == 0 or step == args.steps - 1:
             eval_rng = np.random.default_rng(1234)  # the same batches every eval, so evals compare
