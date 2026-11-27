@@ -1,10 +1,11 @@
-"""Layers, up to a GPT-2-style GPT. A Module finds its parameters through its attributes and lists."""
+"""Layers, up to a GPT that is GPT-2 by default and Llama-style with the modern options.
+A Module finds its parameters through its attributes and lists."""
 from dataclasses import dataclass
 
 import numpy as np
 
 from . import functional as F
-from .tensor import Tensor
+from .tensor import Tensor, concat
 
 
 class Module:
@@ -85,6 +86,15 @@ class LayerNorm(Module):
         return F.layer_norm(x, self.weight, self.bias, self.eps)
 
 
+class RMSNorm(Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        self.weight = Tensor(np.ones(dim), requires_grad=True, dtype=np.float32)
+        self.eps = eps
+
+    def forward(self, x: Tensor) -> Tensor:
+        return F.rms_norm(x, self.weight, self.eps)
+
+
 class MLP(Module):
     """Linear layers of the given sizes with an activation between them (none after the last)."""
 
@@ -101,80 +111,151 @@ class MLP(Module):
         return x
 
 
+class SwiGLU(Module):
+    """down(silu(gate(x)) * up(x)) (Shazeer 2020): a gated MLP with three weight matrices."""
+
+    def __init__(self, dim: int, hidden: int, rng=None):
+        self.gate = Linear(dim, hidden, rng=rng)
+        self.up = Linear(dim, hidden, rng=rng)
+        self.down = Linear(hidden, dim, rng=rng)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.down(self.gate(x).silu() * self.up(x))
+
+
+OPTIONS = {"norm": ("layer", "rms"), "mlp": ("gelu", "swiglu"), "pos": ("learned", "rope")}
+
+
 @dataclass
 class GPTConfig:
+    """The defaults are GPT-2. The modern block (as in Llama) is norm="rms", mlp="swiglu",
+    pos="rope" and n_kv_head < n_head; each can also be switched on alone."""
     vocab_size: int
     block_size: int = 128  # longest context the model can read
     n_layer: int = 4
     n_head: int = 4
     d_model: int = 128
+    norm: str = "layer"  # "layer": LayerNorm; "rms": RMSNorm
+    mlp: str = "gelu"  # "gelu": a 4d GELU MLP; "swiglu": SwiGLU of hidden size 8d/3, about as big
+    pos: str = "learned"  # "learned": a position embedding table; "rope": rotary embeddings in attention
+    n_kv_head: int | None = None  # fewer key/value heads than query heads: grouped-query attention
+
+    def __post_init__(self):
+        for name, allowed in OPTIONS.items():
+            if getattr(self, name) not in allowed:
+                raise ValueError(f"{name}={getattr(self, name)!r}: use one of {', '.join(allowed)}")
+        kv = self.n_head if self.n_kv_head is None else self.n_kv_head
+        if kv < 1 or self.n_head % kv:
+            raise ValueError(f"n_kv_head={self.n_kv_head} must divide n_head={self.n_head}")
+
+
+class KVCache:
+    """The keys and values of every token seen so far, per layer, so that sampling can feed the
+    model only the newest token. Pass the same cache to every call: model(idx, cache=cache)."""
+
+    def __init__(self):
+        self.layers = []  # (keys, values) per layer, each (B, n_kv_head, length, head size)
+        self.length = 0
+
+    def extend(self, layer: int, k: Tensor, v: Tensor):
+        if layer == len(self.layers):
+            self.layers.append((k, v))
+        else:
+            old_k, old_v = self.layers[layer]
+            self.layers[layer] = (concat([old_k, k], axis=2), concat([old_v, v], axis=2))
+        return self.layers[layer]
 
 
 class CausalSelfAttention(Module):
-    """Multi-head attention where position t can only look at positions <= t."""
+    """Multi-head attention where position t can only look at positions <= t. With n_kv_head < n_head,
+    groups of query heads share one key/value head (grouped-query attention, Ainslie et al. 2023)."""
 
-    def __init__(self, d_model: int, n_head: int, rng=None):
+    def __init__(self, d_model: int, n_head: int, n_kv_head: int | None = None, rope: bool = False, rng=None):
         if d_model % n_head:
             raise ValueError(f"d_model={d_model} is not divisible by n_head={n_head}")
-        self.n_head = n_head
-        self.qkv = Linear(d_model, 3 * d_model, rng=rng)
+        self.n_head, self.n_kv_head, self.rope = n_head, n_kv_head or n_head, rope
+        self.qkv = Linear(d_model, d_model + 2 * self.n_kv_head * (d_model // n_head), rng=rng)
         self.proj = Linear(d_model, d_model, rng=rng)
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Tensor, cache: KVCache | None = None, layer: int = 0) -> Tensor:
         B, T, C = x.shape
-        H = self.n_head
-        # one matmul makes q, k and v; split them into heads: (3, B, H, T, C // H)
-        qkv = self.qkv(x).reshape(B, T, 3, H, C // H).transpose(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        H, KV = self.n_head, self.n_kv_head
+        # one matmul makes q, k and v; split into heads: (B, H + 2 KV, T, head size)
+        qkv = self.qkv(x).reshape(B, T, H + 2 * KV, C // H).transpose(0, 2, 1, 3)
+        q, k, v = qkv[:, :H], qkv[:, H:H + KV], qkv[:, H + KV:]
+        if self.rope:
+            start = cache.length if cache is not None else 0  # position of the first new token
+            q, k = F.rope(q, start), F.rope(k, start)
+        if cache is not None:
+            k, v = cache.extend(layer, k, v)  # the cache keeps KV heads, not H: GQA's memory saving
+        if KV < H:
+            k, v = k.repeat(H // KV, axis=1), v.repeat(H // KV, axis=1)
         scores = (q @ k.T) * (1.0 / np.sqrt(C // H))
-        future = np.triu(np.ones((T, T), dtype=bool), k=1)
+        Tk = k.shape[2]  # the new queries are the last T of the Tk positions
+        future = np.arange(Tk)[None, :] > np.arange(Tk - T, Tk)[:, None]
         weights = F.softmax(scores.masked_fill(future, -1e9), axis=-1)
         out = (weights @ v).transpose(0, 2, 1, 3).reshape(B, T, C)
         return self.proj(out)
 
 
+def norm(cfg: GPTConfig) -> Module:
+    return RMSNorm(cfg.d_model) if cfg.norm == "rms" else LayerNorm(cfg.d_model)
+
+
 class Block(Module):
-    """Pre-norm transformer block (GPT-2): x + attn(ln(x)), then x + mlp(ln(x))."""
+    """Pre-norm transformer block: x + attn(norm(x)), then x + mlp(norm(x))."""
 
     def __init__(self, cfg: GPTConfig, rng=None):
-        self.ln1 = LayerNorm(cfg.d_model)
-        self.attn = CausalSelfAttention(cfg.d_model, cfg.n_head, rng=rng)
-        self.ln2 = LayerNorm(cfg.d_model)
-        self.mlp = MLP([cfg.d_model, 4 * cfg.d_model, cfg.d_model], activation="gelu", rng=rng)
+        d = cfg.d_model
+        self.ln1 = norm(cfg)
+        self.attn = CausalSelfAttention(d, cfg.n_head, cfg.n_kv_head, rope=cfg.pos == "rope", rng=rng)
+        self.ln2 = norm(cfg)
+        if cfg.mlp == "swiglu":
+            self.mlp = SwiGLU(d, 8 * d // 3, rng=rng)  # 3 matrices of d x 8d/3 hold as much as 2 of d x 4d
+        else:
+            self.mlp = MLP([d, 4 * d, d], activation="gelu", rng=rng)
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.ln1(x))
+    def forward(self, x: Tensor, cache: KVCache | None = None, layer: int = 0) -> Tensor:
+        x = x + self.attn(self.ln1(x), cache, layer)
         return x + self.mlp(self.ln2(x))
 
 
 class GPT(Module):
-    """GPT-2: token + position embeddings, n_layer blocks, a final norm and a head tied to the
-    token embedding. Called with token ids (B, T); returns (logits, loss or None)."""
+    """Token embeddings (plus learned position embeddings unless pos="rope"), n_layer blocks, a final
+    norm and a head tied to the token embedding. Called with token ids (B, T); returns (logits, loss
+    or None). With a KVCache, idx holds only the tokens that follow the cached ones."""
 
     def __init__(self, cfg: GPTConfig, rng=None):
         rng = rng or np.random.default_rng()
         self.config = cfg
         self.wte = Embedding(cfg.vocab_size, cfg.d_model, rng=rng)
-        self.wpe = Embedding(cfg.block_size, cfg.d_model, rng=rng)
+        self.wpe = Embedding(cfg.block_size, cfg.d_model, rng=rng) if cfg.pos == "learned" else None
         self.blocks = [Block(cfg, rng=rng) for _ in range(cfg.n_layer)]
-        self.ln_f = LayerNorm(cfg.d_model)
+        self.ln_f = norm(cfg)
         # GPT-2 init: N(0, 0.02) weights and zero biases; the projections that add into the
         # residual stream get 0.02 / sqrt(2 * n_layer), so the stream does not grow with depth
         residual_std = 0.02 / np.sqrt(2 * cfg.n_layer)
         for block in self.blocks:
-            for layer in (block.attn.qkv, block.attn.proj, *block.mlp.layers):
-                std = residual_std if layer in (block.attn.proj, block.mlp.layers[-1]) else 0.02
+            mlp = block.mlp
+            mlp_layers = mlp.layers if isinstance(mlp, MLP) else [mlp.gate, mlp.up, mlp.down]
+            for layer in (block.attn.qkv, block.attn.proj, *mlp_layers):
+                std = residual_std if layer is block.attn.proj or layer is mlp_layers[-1] else 0.02
                 layer.weight.data = rng.normal(0, std, layer.weight.shape).astype(np.float32)
                 layer.bias.data = np.zeros_like(layer.bias.data)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, cache: KVCache | None = None):
         idx = np.asarray(idx)
-        T = idx.shape[1]
-        if T > self.config.block_size:
-            raise ValueError(f"sequence of {T} tokens is longer than block_size={self.config.block_size}")
-        x = self.wte(idx) + self.wpe.weight[:T]
-        for block in self.blocks:
-            x = block(x)
+        start = cache.length if cache is not None else 0
+        end = start + idx.shape[1]
+        if end > self.config.block_size:
+            raise ValueError(f"sequence of {end} tokens is longer than block_size={self.config.block_size}")
+        x = self.wte(idx)
+        if self.wpe is not None:
+            x = x + self.wpe.weight[start:end]
+        for i, block in enumerate(self.blocks):
+            x = block(x, cache, i)
+        if cache is not None:
+            cache.length = end
         logits = self.ln_f(x) @ self.wte.weight.T
         loss = F.cross_entropy(logits, targets) if targets is not None else None
         return logits, loss

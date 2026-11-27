@@ -150,3 +150,15 @@ def test_a_corrupt_cache_is_rebuilt_not_trusted(tmp_path):
     ids_file.write_bytes(ids_file.read_bytes()[:100])  # a run killed while writing it
     again = run(tmp_path / "b", "--steps", "2", *cache)
     assert again["train_loss"] == first["train_loss"]
+
+
+def test_modern_block_options_reach_the_model_and_its_checkpoint(tmp_path):
+    metrics = run(tmp_path, "--steps", "2", "--norm", "rms", "--mlp", "swiglu", "--pos", "rope", "--n-kv-head", "1")
+    assert {k: metrics["config"][k] for k in ("norm", "mlp", "pos", "n_kv_head")} == \
+        {"norm": "rms", "mlp": "swiglu", "pos": "rope", "n_kv_head": 1}
+    model, _ = sample.load(tmp_path / "models" / "tiny.npz")
+    names = dict(model.named_parameters())
+    assert "wpe.weight" not in names and "blocks.0.mlp.gate.weight" in names
+    text = sample.main(["--checkpoint", str(tmp_path / "models" / "tiny.npz"), "--prompt", "First",
+                        "--tokens", "20", "--seed", "0"])
+    assert text.startswith("First") and len(text) == len("First") + 20

@@ -114,7 +114,8 @@ def main(argv=None) -> dict:
                         *variant_args(variant), *passthrough]
         metrics = json.loads(saved.read_text()) if saved.exists() else {}
         wanted = vars(train.parse(argv_for_run))
-        same_settings = metrics.get("args") == wanted
+        # an option that train.py gained after the run was saved counts as left at its default
+        same_settings = "args" in metrics and {**vars(train.parse([])), **metrics["args"]} == wanted
         if "final" not in metrics or not same_settings:  # not run, stopped early, or other settings
             metrics = train.main(argv_for_run)
         runs[variant] = metrics

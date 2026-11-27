@@ -5,14 +5,15 @@ from pathlib import Path
 
 import numpy as np
 
-from .nn import GPT, GPTConfig
+from .nn import GPT, GPTConfig, KVCache
 from .tensor import no_grad
 from . import tokenizers
 
 
 def generate(model: GPT, idx, max_new_tokens: int, temperature: float = 1.0, top_k: int | None = None,
-             rng=None) -> np.ndarray:
-    """Append `max_new_tokens` sampled tokens to each row of `idx` (B, T)."""
+             rng=None, use_cache: bool = True) -> np.ndarray:
+    """Append `max_new_tokens` sampled tokens to each row of `idx` (B, T). The model always reads the
+    last block_size tokens; with `use_cache` it reuses their keys and values instead of recomputing them."""
     if temperature <= 0:
         raise ValueError("temperature must be positive (use top_k=1 for greedy decoding)")
     if top_k is not None and top_k < 1:
@@ -21,10 +22,19 @@ def generate(model: GPT, idx, max_new_tokens: int, temperature: float = 1.0, top
     idx = np.asarray(idx)
     if idx.shape[1] == 0:
         raise ValueError("the prompt needs at least one token")
-    # ponytail: re-reads the whole context for every new token. Upgrade path: the KV cache (#8).
+    block, cache = model.config.block_size, None
     with no_grad():
         for _ in range(max_new_tokens):
-            logits, _ = model(idx[:, -model.config.block_size:])
+            if not use_cache:
+                logits, _ = model(idx[:, -block:])
+            elif cache is None or cache.length == block:
+                # first step, or the context is full: the window slides, every position changes, so
+                # start a new cache from the last block_size tokens. ponytail: once full, each step
+                # costs a whole pass again; a rolling cache would be faster but no longer match exactly
+                cache = KVCache()
+                logits, _ = model(idx[:, -block:], cache=cache)
+            else:
+                logits, _ = model(idx[:, -1:], cache=cache)
             logits = logits.data[:, -1].astype(np.float64) / temperature
             if top_k is not None and top_k < logits.shape[-1]:
                 kth = np.sort(logits, axis=-1)[:, -top_k][:, None]

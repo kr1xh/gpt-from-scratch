@@ -1,8 +1,12 @@
 import numpy as np
+import pytest
 import torch
 import torch.nn.functional as F
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from gradcheck import RNG, check, rand
+from experiments.torch_gpt import rope as torch_rope
 from scratchgpt import functional as fn
 from scratchgpt.tensor import Tensor
 
@@ -33,3 +37,28 @@ def test_layer_norm():
     x, w, b = rand(2, 3, 4), rand(4), rand(4)
     check(lambda t, w_, b_: fn.layer_norm(t, w_, b_),
           lambda t, w_, b_: F.layer_norm(t, (4,), w_, b_, eps=1e-5), x, w, b)
+
+
+def test_rms_norm():
+    x, w = rand(2, 3, 4), rand(4)
+    check(lambda t, w_: fn.rms_norm(t, w_), lambda t, w_: F.rms_norm(t, (4,), w_, eps=1e-5), x, w)
+
+
+def test_rope_matches_a_complex_number_rotation():
+    check(lambda t: fn.rope(t), lambda t: torch_rope(t), rand(2, 2, 5, 6))
+    check(lambda t: fn.rope(t, offset=7), lambda t: torch_rope(t, offset=7), rand(1, 3, 2, 4))
+
+
+@settings(max_examples=40, deadline=None)
+@given(m=st.integers(0, 60), n=st.integers(0, 60), shift=st.integers(0, 60), seed=st.integers(0, 99))
+def test_rotated_scores_depend_only_on_how_far_apart_two_positions_are(m, n, shift, seed):
+    q, k = np.random.default_rng(seed).standard_normal((2, 1, 1, 1, 8))
+
+    def score(a, b):
+        return float((fn.rope(Tensor(q), offset=a).data * fn.rope(Tensor(k), offset=b).data).sum())
+    assert score(m, n) == pytest.approx(score(m + shift, n + shift), rel=1e-9, abs=1e-12)
+
+
+def test_rope_keeps_each_vector_s_length():
+    x = rand(2, 2, 9, 6)
+    np.testing.assert_allclose(np.linalg.norm(fn.rope(Tensor(x)).data, axis=-1), np.linalg.norm(x, axis=-1))
