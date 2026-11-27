@@ -39,7 +39,7 @@ def test_neg():
 
 
 @pytest.mark.parametrize("shapes", [((3, 4), (4, 5)), ((2, 3, 4), (2, 4, 5)), ((3, 4), (2, 4, 5)),
-                                    ((2, 1, 3, 4), (5, 4, 2))])
+                                    ((2, 1, 3, 4), (5, 4, 2)), ((2, 3, 4), (4, 5)), ((2, 2, 3, 4), (4, 5))])
 def test_matmul_including_batch_broadcasting(shapes):
     check(lambda a, b: a @ b, lambda a, b: a @ b, rand(*shapes[0]), rand(*shapes[1]))
 

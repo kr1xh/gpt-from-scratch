@@ -1,0 +1,93 @@
+"""End to end on a tiny text: train writes metrics and a checkpoint, sample reads it back."""
+import json
+
+import numpy as np
+
+from scratchgpt import sample, train
+from scratchgpt.nn import GPT
+
+TEXT = "First Citizen:\nBefore we proceed any further, hear me speak.\n" * 40
+TINY = ["--n-layer", "1", "--n-head", "2", "--d-model", "16", "--block-size", "16",
+        "--batch-size", "8", "--eval-every", "20", "--eval-iters", "2", "--warmup", "5", "--lr", "1e-2"]
+
+
+def run(tmp_path, *extra):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text(TEXT, encoding="utf-8")
+    return train.main(["--data", str(corpus), "--out-dir", str(tmp_path), "--name", "tiny", *TINY, *extra])
+
+
+def test_training_writes_metrics_and_learns(tmp_path):
+    metrics = run(tmp_path, "--steps", "100")
+    saved = json.loads((tmp_path / "results" / "tiny.json").read_text())
+    assert saved == metrics
+    assert saved["config"]["d_model"] == 16 and saved["config"]["vocab_size"] == len(set(TEXT))
+    assert len(saved["train_loss"]) == 100
+    assert [e["step"] for e in saved["evals"]] == [0, 20, 40, 60, 80, 99]
+    first, last = saved["evals"][0], saved["evals"][-1]
+    assert first["val_loss"] > 3.0 and last["val_loss"] < 1.0  # the text repeats: learnable
+    assert {"train_loss", "val_loss", "lr", "seconds"} <= set(last)
+
+
+def test_same_seed_same_run(tmp_path):
+    a = run(tmp_path / "a", "--steps", "5")
+    b = run(tmp_path / "b", "--steps", "5")
+    assert a["train_loss"] == b["train_loss"]
+
+
+def test_sample_continues_a_prompt_from_the_checkpoint(tmp_path):
+    run(tmp_path, "--steps", "100")
+    text = sample.main(["--checkpoint", str(tmp_path / "models" / "tiny.npz"), "--prompt", "First",
+                        "--tokens", "30", "--top-k", "5", "--seed", "0"])
+    assert text.startswith("First") and len(text) == len("First") + 30
+    again = sample.main(["--checkpoint", str(tmp_path / "models" / "tiny.npz"), "--prompt", "First",
+                         "--tokens", "30", "--top-k", "5", "--seed", "0"])
+    assert again == text
+
+
+def test_checkpoint_holds_the_trained_weights_not_the_initial_ones(tmp_path):
+    run(tmp_path, "--steps", "100")
+    model, tok = sample.load(tmp_path / "models" / "tiny.npz")
+    ids = np.array([tok.encode(TEXT[:17])])
+    _, loss = model(ids[:, :-1], ids[:, 1:])
+    assert loss.item() < 1.0  # a fresh model scores about ln(27) = 3.3
+
+
+def test_validation_text_may_use_characters_the_training_part_lacks(tmp_path):
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text(TEXT + "Zz!" * 5, encoding="utf-8")  # 'Z', 'z' and '!' only in the last 10%
+    metrics = train.main(["--data", str(corpus), "--out-dir", str(tmp_path), "--name", "t", *TINY, "--steps", "2"])
+    assert metrics["config"]["vocab_size"] == len(set(TEXT + "Zz!"))
+
+
+def test_a_checkpoint_is_written_at_every_eval_so_a_stopped_run_keeps_its_weights(tmp_path, monkeypatch):
+    calls = []
+    real_savez = np.savez
+    monkeypatch.setattr(train.np, "savez", lambda *a, **k: (calls.append(a[0]), real_savez(*a, **k)))
+    run(tmp_path, "--steps", "41")  # evals at 0, 20, 40
+    assert len(calls) == 3
+
+
+def moved_from_init(tmp_path) -> float:
+    """Largest weight change between the checkpoint and the model the seed initialised."""
+    model, _ = sample.load(tmp_path / "models" / "tiny.npz")
+    init = GPT(model.config, rng=np.random.default_rng(0)).state_dict()
+    return max(float(np.abs(v - init[k]).max()) for k, v in model.state_dict().items())
+
+
+def test_the_learning_rate_schedule_is_applied(tmp_path):
+    run(tmp_path, "--steps", "3", "--warmup", "1000000")  # warmup keeps the lr near 1e-8
+    assert moved_from_init(tmp_path) < 1e-5
+
+
+def test_gradients_are_clipped_before_the_optimizer_sees_them(tmp_path):
+    # clipped to 1e-12 the gradients drown in Adam's eps (1e-8), so the steps all but vanish
+    run(tmp_path, "--steps", "3", "--grad-clip", "1e-12")
+    assert moved_from_init(tmp_path) < 1e-4
+
+
+def test_every_eval_uses_the_same_batches(tmp_path):
+    metrics = run(tmp_path, "--steps", "41", "--lr", "0")  # weights never change
+    losses = {(e["train_loss"], e["val_loss"]) for e in metrics["evals"]}
+    assert len(losses) == 1
