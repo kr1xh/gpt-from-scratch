@@ -2,6 +2,7 @@
 import json
 
 import numpy as np
+import pytest
 
 from scratchgpt import sample, train
 from scratchgpt.nn import GPT
@@ -91,3 +92,61 @@ def test_every_eval_uses_the_same_batches(tmp_path):
     metrics = run(tmp_path, "--steps", "41", "--lr", "0")  # weights never change
     losses = {(e["train_loss"], e["val_loss"]) for e in metrics["evals"]}
     assert len(losses) == 1
+
+
+def test_every_run_ends_with_an_exact_bits_per_byte_on_validation(tmp_path):
+    metrics = run(tmp_path, "--steps", "3")
+    final = metrics["final"]
+    val_text = TEXT[int(len(TEXT) * 0.9):]
+    assert final["val_bytes"] == len(val_text.encode()) - 1  # every character after the first
+    assert 0 < final["val_bits_per_byte"] < 8
+
+
+def test_bpe_runs_train_cache_and_sample(tmp_path, monkeypatch):
+    bpe = ["--tokenizer", "bpe", "--vocab-size", "270", "--cache-dir", str(tmp_path / "cache")]
+    first = run(tmp_path / "one", "--steps", "3", *bpe)
+    assert 256 < first["config"]["vocab_size"] <= 270  # BPE stops early once no pair repeats
+    assert json.loads((tmp_path / "one" / "models" / "tiny.tokenizer.json").read_text())["type"] == "bpe"
+    text = sample.main(["--checkpoint", str(tmp_path / "one" / "models" / "tiny.npz"), "--prompt", "First",
+                        "--tokens", "5", "--seed", "0"])
+    assert text.startswith("First")
+
+    # a second run with the same text and vocabulary reuses the cache: no training, no encoding
+    from scratchgpt import tokenizers
+    monkeypatch.setattr(tokenizers.BPETokenizer, "train", lambda *a: pytest.fail("retrained"))
+    monkeypatch.setattr(tokenizers.BPETokenizer, "encode", lambda *a: pytest.fail("re-encoded"))
+    again = run(tmp_path / "two", "--steps", "3", *bpe)
+    assert again["train_loss"] == first["train_loss"]
+
+
+def test_the_bpe_tokenizer_only_sees_the_training_text(tmp_path, monkeypatch):
+    from scratchgpt import tokenizers
+    seen = []
+    real = tokenizers.BPETokenizer.train.__func__
+    monkeypatch.setattr(tokenizers.BPETokenizer, "train", classmethod(lambda cls, t, v: (seen.append(t), real(cls, t, v))[1]))
+    run(tmp_path, "--steps", "1", "--tokenizer", "bpe", "--vocab-size", "260", "--cache-dir", str(tmp_path / "c"))
+    assert seen == [TEXT[:int(len(TEXT) * 0.9)]]
+
+
+def test_the_cache_keeps_tokenizers_for_different_vocabularies_and_texts_apart(tmp_path):
+    cache = ["--tokenizer", "bpe", "--cache-dir", str(tmp_path / "cache")]
+    small = run(tmp_path / "a", "--steps", "1", *cache, "--vocab-size", "260")
+    large = run(tmp_path / "b", "--steps", "1", *cache, "--vocab-size", "270")
+    assert small["config"]["vocab_size"] == 260 and large["config"]["vocab_size"] > 260
+    other = tmp_path / "c"
+    other.mkdir()
+    (other / "corpus.txt").write_text(TEXT.upper(), encoding="utf-8")
+    shouted = train.main(["--data", str(other / "corpus.txt"), "--out-dir", str(other), "--name", "tiny", *TINY,
+                          "--steps", "1", *cache, "--vocab-size", "260"])
+    # different text, different merges: the upper-case corpus must not reuse the first tokenizer
+    assert sample.load(other / "models" / "tiny.npz")[1].merges != sample.load(tmp_path / "a" / "models" / "tiny.npz")[1].merges
+    assert shouted["config"]["vocab_size"] == 260
+
+
+def test_a_corrupt_cache_is_rebuilt_not_trusted(tmp_path):
+    cache = ["--tokenizer", "bpe", "--vocab-size", "260", "--cache-dir", str(tmp_path / "cache")]
+    first = run(tmp_path / "a", "--steps", "2", *cache)
+    (ids_file,) = (tmp_path / "cache").glob("*-ids.npz")
+    ids_file.write_bytes(ids_file.read_bytes()[:100])  # a run killed while writing it
+    again = run(tmp_path / "b", "--steps", "2", *cache)
+    assert again["train_loss"] == first["train_loss"]

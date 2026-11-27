@@ -1,7 +1,9 @@
+import numpy as np
 import pytest
 from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
+from scratchgpt import tokenizers
 from scratchgpt.tokenizers import BPETokenizer, CharTokenizer
 
 CORPUS = "To be, or not to be, that is the question. नमस्ते दुनिया 🙂🙂 café " * 20
@@ -108,3 +110,22 @@ def test_bpe_applies_merges_in_learned_order_when_they_overlap():
     # "bc" was learned before "ab", so "abc" is a + bc, not ab + c
     tok = BPETokenizer({(98, 99): 256, (97, 98): 257})
     assert tok.encode("abc") == [97, 256]
+
+
+def test_load_reads_either_kind_from_its_file(tmp_path):
+    CharTokenizer.train("abc").save(tmp_path / "c.json")
+    BPE.save(tmp_path / "b.json")
+    assert tokenizers.load(tmp_path / "c.json").encode("cab") == [2, 0, 1]
+    assert tokenizers.load(tmp_path / "b.json").merges == BPE.merges
+
+
+def test_byte_lengths_say_how_much_text_each_id_stands_for():
+    np.testing.assert_array_equal(CharTokenizer.train("aé").byte_lengths(), [1, 2])  # é is 2 bytes
+    tok = BPETokenizer({(97, 98): 256, (256, 99): 257})  # ab, then abc
+    lengths = tok.byte_lengths()
+    assert len(lengths) == 258 and lengths[97] == 1 and lengths[256] == 2 and lengths[257] == 3
+
+
+@given(st.text())
+def test_the_byte_lengths_of_an_encoding_add_up_to_the_text(text):
+    assert BPE.byte_lengths()[BPE.encode(text)].sum() == len(text.encode("utf-8"))

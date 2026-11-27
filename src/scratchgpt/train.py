@@ -5,9 +5,11 @@ eval so a stopped run keeps its numbers) and models/<name>.npz plus models/<name
 """
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import time
+import zipfile
 from pathlib import Path
 
 # One BLAS thread per physical core: on this 4-core, 8-thread laptop 8 threads made a step 1.6x
@@ -17,9 +19,10 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", str(max(1, (os.cpu_count() or 2) /
 import numpy as np
 
 from . import data, optim
+from .evaluate import bits_per_byte
 from .nn import GPT, GPTConfig
 from .tensor import no_grad
-from .tokenizers import CharTokenizer
+from .tokenizers import BPETokenizer, CharTokenizer
 
 
 def parse(argv):
@@ -27,6 +30,9 @@ def parse(argv):
     ap.add_argument("--name", default="baseline")
     ap.add_argument("--data", help="a text file; default: TinyShakespeare, downloaded into data/")
     ap.add_argument("--out-dir", default=".", help="results/ and models/ are created under it")
+    ap.add_argument("--tokenizer", choices=["char", "bpe"], default="char")
+    ap.add_argument("--vocab-size", type=int, default=512, help="BPE only: 256 byte ids plus merges")
+    ap.add_argument("--cache-dir", default="data/cache", help="BPE only: trained tokenizers and encoded ids")
     ap.add_argument("--n-layer", type=int, default=4)
     ap.add_argument("--n-head", type=int, default=4)
     ap.add_argument("--d-model", type=int, default=128)
@@ -60,15 +66,37 @@ def estimate_loss(model, ids, args, rng) -> float:
     return float(np.mean(losses))
 
 
+def tokenize(text: str, args):
+    """The tokenizer and both splits as ids. BPE is trained on the training split only (merges
+    learned from validation text would leak it) and, being slow, is cached with its ids."""
+    train_text, val_text = data.split(text, 0.1)
+    if args.tokenizer == "char":
+        # the character set comes from all the text: a character only in validation would otherwise
+        # fail to encode, and knowing a character exists leaks nothing about what follows it
+        tok = CharTokenizer.train(text)
+        return tok, np.array(tok.encode(train_text)), np.array(tok.encode(val_text))
+    key = f"bpe{args.vocab_size}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}"
+    cache = Path(args.cache_dir)
+    try:
+        with np.load(cache / f"{key}-ids.npz") as f:
+            return BPETokenizer.load(cache / f"{key}.json"), f["train"], f["val"]
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile):  # missing, or cut short by a stopped run: rebuild it
+        pass
+    tok = BPETokenizer.train(train_text, args.vocab_size)
+    train_ids, val_ids = np.array(tok.encode(train_text)), np.array(tok.encode(val_text))
+    cache.mkdir(parents=True, exist_ok=True)
+    tok.save(cache / f"{key}.json")
+    partial = cache / f"{key}-ids.partial"
+    with open(partial, "wb") as f:
+        np.savez(f, train=train_ids, val=val_ids)
+    os.replace(partial, cache / f"{key}-ids.npz")  # the ids file only ever appears complete
+    return tok, train_ids, val_ids
+
+
 def main(argv=None) -> dict:
     args = parse(argv)
     text = Path(args.data).read_text(encoding="utf-8") if args.data else data.load_tinyshakespeare()
-    train_text, val_text = data.split(text, 0.1)
-    # the character set comes from all the text: a character that only appears in validation would
-    # otherwise fail to encode, and knowing a character exists leaks nothing about what follows it
-    tok = CharTokenizer.train(text)
-    train_ids = np.array(tok.encode(train_text))
-    val_ids = np.array(tok.encode(val_text))
+    tok, train_ids, val_ids = tokenize(text, args)
 
     cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model)
     rng = np.random.default_rng(args.seed)
@@ -81,7 +109,7 @@ def main(argv=None) -> dict:
     (out / "results").mkdir(parents=True, exist_ok=True)
     (out / "models").mkdir(parents=True, exist_ok=True)
     metrics = {"config": {**vars(args), **dataclasses.asdict(cfg), "params": sum(p.size for p in params)},
-               "train_loss": [], "evals": []}
+               "args": vars(args), "train_loss": [], "evals": []}
     tok.save(out / "models" / f"{args.name}.tokenizer.json")
 
     start = time.perf_counter()
@@ -111,6 +139,12 @@ def main(argv=None) -> dict:
             np.savez(out / "models" / f"{args.name}.npz", __config__=json.dumps(dataclasses.asdict(cfg)),
                      **model.state_dict())
 
+    # exact score on the whole validation split, comparable across tokenizers (see evaluate.py)
+    result = bits_per_byte(model, tok, val_ids, args.batch_size)
+    metrics["final"] = {"val_bits_per_byte": result["bits_per_byte"], "val_tokens": result["tokens"],
+                        "val_bytes": result["bytes"], "seconds": round(time.perf_counter() - start, 2)}
+    print(f"final  val {result['bits_per_byte']:.4f} bits per byte", flush=True)
+    (out / "results" / f"{args.name}.json").write_text(json.dumps(metrics, indent=1))
     return metrics
 
 
