@@ -44,6 +44,15 @@ def parse(argv):
     return ap.parse_args(argv)
 
 
+BETAS = (0.9, 0.99)
+
+
+def make_optimizers(params, lr: float, weight_decay: float) -> list:
+    """AdamW with weight decay on the matrices only; biases and norm gains are left alone (nanoGPT)."""
+    return [optim.AdamW([p for p in params if p.ndim >= 2], lr=lr, betas=BETAS, weight_decay=weight_decay),
+            optim.AdamW([p for p in params if p.ndim < 2], lr=lr, betas=BETAS, weight_decay=0.0)]
+
+
 def estimate_loss(model, ids, args, rng) -> float:
     with no_grad():
         losses = [model(*data.get_batch(ids, args.batch_size, args.block_size, rng))[1].item()
@@ -64,11 +73,8 @@ def main(argv=None) -> dict:
     cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model)
     rng = np.random.default_rng(args.seed)
     model = GPT(cfg, rng=rng)
-    # weight decay on the matrices only; biases and norm gains are left alone (as in nanoGPT)
     params = model.parameters()
-    opts = [optim.AdamW([p for p in params if p.ndim >= 2], lr=args.lr, betas=(0.9, 0.99),
-                        weight_decay=args.weight_decay),
-            optim.AdamW([p for p in params if p.ndim < 2], lr=args.lr, betas=(0.9, 0.99), weight_decay=0.0)]
+    opts = make_optimizers(params, args.lr, args.weight_decay)
     min_lr = args.lr / 10 if args.min_lr is None else args.min_lr
 
     out = Path(args.out_dir)

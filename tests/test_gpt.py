@@ -4,10 +4,10 @@ import math
 import numpy as np
 import pytest
 import torch
-import torch.nn.functional as TF
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from experiments.torch_gpt import forward as torch_gpt
 from scratchgpt import optim
 from scratchgpt.nn import GPT, GPTConfig
 
@@ -18,26 +18,6 @@ def as_float64(model):
     for p in model.parameters():
         p.data = p.data.astype(np.float64)
     return model
-
-
-def torch_gpt(P, cfg, idx, targets):
-    """GPT-2 written with torch's own layer norm, attention, GELU and cross-entropy."""
-    B, T = idx.shape
-    C, H = cfg.d_model, cfg.n_head
-    x = P["wte.weight"][idx] + P["wpe.weight"][:T]
-    for i in range(cfg.n_layer):
-        p = lambda name: P[f"blocks.{i}.{name}"]  # noqa: E731
-        h = TF.layer_norm(x, (C,), p("ln1.weight"), p("ln1.bias"))
-        q, k, v = (h @ p("attn.qkv.weight") + p("attn.qkv.bias")).split(C, dim=-1)
-        q, k, v = (t.view(B, T, H, C // H).transpose(1, 2) for t in (q, k, v))
-        a = TF.scaled_dot_product_attention(q, k, v, is_causal=True)
-        x = x + a.transpose(1, 2).reshape(B, T, C) @ p("attn.proj.weight") + p("attn.proj.bias")
-        h = TF.layer_norm(x, (C,), p("ln2.weight"), p("ln2.bias"))
-        h = TF.gelu(h @ p("mlp.layers.0.weight") + p("mlp.layers.0.bias"), approximate="tanh")
-        x = x + h @ p("mlp.layers.1.weight") + p("mlp.layers.1.bias")
-    x = TF.layer_norm(x, (C,), P["ln_f.weight"], P["ln_f.bias"])
-    logits = x @ P["wte.weight"].T  # the output head is tied to the token embedding
-    return logits, TF.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
 
 
 def test_logits_loss_and_every_gradient_match_a_torch_reference():
