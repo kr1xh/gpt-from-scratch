@@ -12,7 +12,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # torch is only the reference the tests compare against; src/ never imports it
-dev = ["pytest>=8", "torch>=2.3"]
+dev = ["pytest>=8", "torch>=2.3", "hypothesis>=6.100"]
 
 [build-system]
 requires = ["setuptools>=68"]
