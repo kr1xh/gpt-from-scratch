@@ -42,6 +42,10 @@ Sir, well.
 
 The speaker names, line breaks and most of the words are already in place. The later releases try to beat this number at the same budget.
 
+## Results
+
+[REPORT.md](REPORT.md) has the studies, one question per section. So far: training on this engine follows PyTorch to within float32 rounding over 500 steps (float64 agrees to 10⁻¹⁵), at 2–4× PyTorch's time per step.
+
 ## Roadmap
 
 | Release | Contents |
