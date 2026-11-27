@@ -48,6 +48,7 @@ def parse(argv):
     ap.add_argument("--min-lr", type=float, default=None, help="default: lr / 10")
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--weight-decay", type=float, default=0.1)
+    ap.add_argument("--optimizer", choices=OPTIMIZERS, default="adamw")
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--eval-every", type=int, default=250)
     ap.add_argument("--eval-iters", type=int, default=20)
@@ -58,10 +59,29 @@ def parse(argv):
 BETAS = (0.9, 0.99)
 
 
-def make_optimizers(params, lr: float, weight_decay: float) -> list:
-    """AdamW with weight decay on the matrices only; biases and norm gains are left alone (nanoGPT)."""
-    return [optim.AdamW([p for p in params if p.ndim >= 2], lr=lr, betas=BETAS, weight_decay=weight_decay),
-            optim.AdamW([p for p in params if p.ndim < 2], lr=lr, betas=BETAS, weight_decay=0.0)]
+OPTIMIZERS = ("adamw", "adam", "sgd", "momentum", "muon")
+EMBEDDINGS = ("wte.weight", "wpe.weight")  # tables, not maps; wte is also the output head
+
+
+def make_optimizers(model, lr: float, weight_decay: float, optimizer: str = "adamw") -> list:
+    """Weight decay goes on the matrices only; biases and norm gains are left alone (nanoGPT). With
+    "muon", the hidden matrices get Muon, and the embeddings and vectors get AdamW (Jordan et al.)."""
+    named = list(model.named_parameters())
+    matrices = [p for n, p in named if p.ndim >= 2]
+    vectors = [p for n, p in named if p.ndim < 2]
+    if optimizer == "muon":
+        hidden = [p for n, p in named if p.ndim == 2 and n not in EMBEDDINGS]
+        tables = [p for n, p in named if n in EMBEDDINGS]
+        return [optim.Muon(hidden, lr=lr, weight_decay=weight_decay),
+                optim.AdamW(tables, lr=lr, betas=BETAS, weight_decay=weight_decay),
+                optim.AdamW(vectors, lr=lr, betas=BETAS, weight_decay=0.0)]
+    make = {
+        "adamw": lambda ps, wd: optim.AdamW(ps, lr=lr, betas=BETAS, weight_decay=wd),
+        "adam": lambda ps, wd: optim.Adam(ps, lr=lr, betas=BETAS, weight_decay=wd),  # L2 in the gradient
+        "sgd": lambda ps, wd: optim.SGD(ps, lr=lr, weight_decay=wd),
+        "momentum": lambda ps, wd: optim.SGD(ps, lr=lr, momentum=0.9, nesterov=True, weight_decay=wd),
+    }[optimizer]
+    return [make(matrices, weight_decay), make(vectors, 0.0)]
 
 
 def estimate_loss(model, ids, args, rng) -> float:
@@ -111,7 +131,7 @@ def main(argv=None) -> dict:
     model = GPT(cfg, rng=np.random.default_rng([args.seed, 0]))
     rng = np.random.default_rng([args.seed, 1])
     params = model.parameters()
-    opts = make_optimizers(params, args.lr, args.weight_decay)
+    opts = make_optimizers(model, args.lr, args.weight_decay, args.optimizer)
     min_lr = args.lr / 10 if args.min_lr is None else args.min_lr
 
     out = Path(args.out_dir)

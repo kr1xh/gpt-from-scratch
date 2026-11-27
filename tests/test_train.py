@@ -185,3 +185,12 @@ def test_mlp_hidden_sets_the_width_of_the_mlp(tmp_path):
     model, _ = sample.load(tmp_path / "models" / "tiny.npz")
     assert metrics["config"]["mlp_hidden"] == 20
     assert dict(model.named_parameters())["blocks.0.mlp.gate.weight"].shape == (16, 20)
+
+
+@pytest.mark.parametrize("optimizer", ["adam", "sgd", "momentum", "muon"])
+def test_the_optimizer_option_changes_the_updates_not_the_start(tmp_path, optimizer):
+    adamw = run(tmp_path / "adamw", "--steps", "3")["train_loss"]
+    other = run(tmp_path / optimizer, "--steps", "3", "--optimizer", optimizer)
+    assert other["args"]["optimizer"] == optimizer
+    assert other["train_loss"][0] == adamw[0]  # same weights and batch before any update
+    assert other["train_loss"][1:] != adamw[1:]

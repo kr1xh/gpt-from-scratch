@@ -48,7 +48,7 @@ def run_ours(cfg, state, batches, hp, dtype) -> dict:
     params = model.parameters()
     for p in params:
         p.data = p.data.astype(dtype)
-    opts = make_optimizers(params, hp["lr"], hp["weight_decay"])
+    opts = make_optimizers(model, hp["lr"], hp["weight_decay"])
     losses, seconds = [], []
     for step, (x, y) in enumerate(batches):
         start = time.perf_counter()

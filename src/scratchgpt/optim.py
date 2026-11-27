@@ -80,6 +80,42 @@ class AdamW(Adam):
         super().__init__(params, lr, betas, eps, weight_decay)
 
 
+def newton_schulz(g: np.ndarray, steps: int = 5, eps: float = 1e-7) -> np.ndarray:
+    """Push every singular value of g towards 1 and keep its singular vectors: roughly U V^T for
+    g = U S V^T, from a few steps of an odd quintic matrix polynomial (Jordan et al. 2024). The
+    coefficients buy speed over exactness, so the values land near 1, not on it."""
+    a, b, c = 3.4445, -4.7750, 2.0315
+    tall = g.shape[0] > g.shape[1]
+    x = g.T if tall else g  # iterate on the wide side, where x @ x.T is the smaller matrix
+    x = x / max(float(np.linalg.norm(x)), eps)  # Frobenius norm >= spectral norm: values start <= 1
+    for _ in range(steps):
+        gram = x @ x.T
+        x = a * x + (b * gram + c * gram @ gram) @ x
+    return x.T if tall else x
+
+
+class Muon(Optimizer):
+    """MomentUm Orthogonalised by Newton-Schulz (Jordan et al. 2024) for weight matrices, as
+    torch.optim.Muon with adjust_lr_fn="match_rms_adamw": the orthogonalised update is scaled by
+    0.2 * sqrt(max(rows, cols)), which gives it about the size of an AdamW update (Liu et al. 2025),
+    so Muon and AdamW can share one learning rate. Weight decay is decoupled, as in AdamW."""
+
+    def __init__(self, params, lr: float = 1e-3, momentum: float = 0.95, nesterov: bool = True,
+                 weight_decay: float = 0.0, ns_steps: int = 5):
+        super().__init__(params, lr)
+        if any(p.ndim != 2 for p in self.params):
+            raise ValueError("Muon updates 2-D weight matrices only; give vectors to AdamW")
+        self.momentum, self.nesterov, self.weight_decay, self.ns_steps = momentum, nesterov, weight_decay, ns_steps
+        self.buf = [np.zeros_like(p.data) for p in self.params]
+
+    def _update(self, i, p, g):
+        self.buf[i] += (1 - self.momentum) * (g - self.buf[i])  # an average of past gradients
+        update = g + self.momentum * (self.buf[i] - g) if self.nesterov else self.buf[i]
+        update = newton_schulz(update, self.ns_steps)
+        p.data *= 1 - self.lr * self.weight_decay
+        p.data -= self.lr * 0.2 * math.sqrt(max(p.shape)) * update
+
+
 def cosine_lr(step: int, max_lr: float, warmup: int, total: int, min_lr: float = 0.0) -> float:
     """Linear warmup to `max_lr` over `warmup` steps, then cosine decay to `min_lr` at `total`."""
     if step < warmup:
