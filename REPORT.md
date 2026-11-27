@@ -43,3 +43,38 @@ Hardware for every run: a 4-core, 8-thread laptop CPU with 13.9 GB of RAM and no
 - Times vary by about 30% between runs because the laptop runs other software. PyTorch's float32 time ranged from 319 to 428 ms between the two runs.
 - My engine always ran before PyTorch, so any thermal throttling would count against mine.
 - The engine's gradient clipping computes the norm in float64, while PyTorch uses float32. That's a tiny extra difference, and part of what the float32 gap measures.
+
+---
+
+## 2. At equal compute, which tokenizer predicts TinyShakespeare best?
+
+`python -m experiments.char_vs_bpe` (about 1.5 hours; finished runs are skipped when rerun)
+
+**Setup.** Four runs of `scratchgpt.train`, identical except for the tokenizer:
+- **Tokenizers:** characters (65 ids), and byte-level BPE with 256, 512 and 1024 ids, trained on the training split only. BPE with 256 ids has no merges, since 256 ids are exactly the bytes, so it is a byte-level baseline.
+- **Same compute:** the baseline model (4 layers, 4 heads, width 128, a 128-token context) for 1500 steps of 16 × 128 tokens, with the same recipe and seed. Only the embedding and its tied head grow with the vocabulary. That adds about 0.12M parameters at 1024 ids.
+- **Score:** loss per token can't be compared across tokenizers, because a token is one character in one run and a few in another. Each model is scored on the whole validation split (111,540 characters) as the total loss in bits divided by the characters predicted, using `scratchgpt.evaluate.bits_per_byte`. TinyShakespeare is ASCII, so bytes are characters.
+
+![Validation bits per character during training, and the final score of each tokenizer](docs/figures/char_vs_bpe.png)
+
+| | char | BPE 256 | BPE 512 | BPE 1024 |
+|---|---|---|---|---|
+| **Validation bits per character** | 2.554 | 2.576 | **2.373** | 2.388 |
+| Characters per token | 1.00 | 1.00 | 1.94 | 2.39 |
+| Context, in characters | 128 | 128 | 248 | 306 |
+| Passes over the training text | 3.1 | 3.1 | 5.9 | 7.3 |
+| Parameters | 818,048 | 842,496 | 875,264 | 940,800 |
+| Train/val gap at step 1500, bits per character (estimated) | 0.20 | 0.22 | 0.30 | 0.22 |
+| Minutes | 24 | 21 | 21 | 24 |
+
+**Answer.**
+- **BPE with 512 ids wins.** It scores 2.373 bits per character, 0.18 bits (7%) below characters. Its curve sits below the character curve at every eval.
+- **The win comes with more text per step.** Each BPE-512 token covers 1.94 characters, so at the same tokens per step the model sees about twice the text and about twice the context. At a fixed compute budget that is what a tokenizer buys, and this study doesn't try to separate the two.
+- **1024 ids gave nothing over 512.** Tokens grow to 2.39 characters, but the score is 0.014 bits worse. Two possible reasons: each id gets fewer training examples, and the head has more ids to spread probability over. With one seed I can't tell that gap from noise.
+- **Characters and raw bytes tie.** The byte model is 0.02 bits worse on the same sequences. It has 191 ids that never appear in the text, and the gap is again within what one seed can resolve.
+
+**Limits.**
+- One seed per tokenizer, one dataset and one model size. Differences under about 0.03 bits shouldn't be read as real.
+- Equal compute isn't equal data. The BPE runs see up to 2.4 times as many characters and repeat the training text up to 7 times, and they overfit more (gap row). A longer or larger run could change the order.
+- The left panel is an estimate: the loss on 20 sampled validation batches at each eval, converted with each tokenizer's average characters per token. The right panel and the table's first row are exact scores on the whole split.
+- Each window of the evaluation starts with no context, so early predictions in a window are harder. Longer tokens make this cost slightly smaller for BPE.

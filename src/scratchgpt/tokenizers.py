@@ -7,6 +7,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
+
 
 class CharTokenizer:
     def __init__(self, chars: list[str]):
@@ -29,6 +31,10 @@ class CharTokenizer:
 
     def decode(self, ids) -> str:
         return "".join(self.chars[i] for i in ids)
+
+    def byte_lengths(self) -> np.ndarray:
+        """UTF-8 bytes of text each id stands for (to measure loss per byte, not per token)."""
+        return np.array([len(c.encode("utf-8")) for c in self.chars])
 
     def save(self, path) -> None:
         Path(path).write_text(json.dumps({"type": "char", "chars": self.chars}), encoding="utf-8")
@@ -94,6 +100,9 @@ class BPETokenizer:
     def decode(self, ids) -> str:
         return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
 
+    def byte_lengths(self) -> np.ndarray:
+        return np.array([len(self.vocab[i]) for i in range(self.vocab_size)])
+
     def save(self, path) -> None:
         Path(path).write_text(json.dumps({"type": "bpe", "merges": [list(p) for p in self.merges]}),
                               encoding="utf-8")
@@ -102,3 +111,9 @@ class BPETokenizer:
     def load(cls, path) -> "BPETokenizer":
         pairs = json.loads(Path(path).read_text(encoding="utf-8"))["merges"]
         return cls({(a, b): 256 + i for i, (a, b) in enumerate(pairs)})
+
+
+def load(path):
+    """Load a tokenizer saved by either class; the file records which one it is."""
+    kind = json.loads(Path(path).read_text(encoding="utf-8"))["type"]
+    return {"char": CharTokenizer, "bpe": BPETokenizer}[kind].load(path)

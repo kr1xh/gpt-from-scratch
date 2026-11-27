@@ -7,7 +7,7 @@ import numpy as np
 
 from .nn import GPT, GPTConfig
 from .tensor import no_grad
-from .tokenizers import CharTokenizer
+from . import tokenizers
 
 
 def generate(model: GPT, idx, max_new_tokens: int, temperature: float = 1.0, top_k: int | None = None,
@@ -44,7 +44,7 @@ def load(checkpoint):
         cfg = GPTConfig(**json.loads(str(f["__config__"])))
     model = GPT(cfg)
     model.load_state_dict(state)
-    return model, CharTokenizer.load(checkpoint.with_suffix(".tokenizer.json"))
+    return model, tokenizers.load(checkpoint.with_suffix(".tokenizer.json"))
 
 
 def main(argv=None) -> str:

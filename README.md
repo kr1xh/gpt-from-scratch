@@ -44,7 +44,9 @@ The speaker names, line breaks and most of the words are already in place. The l
 
 ## Results
 
-[REPORT.md](REPORT.md) has the studies, one question per section. So far: training on this engine follows PyTorch to within float32 rounding over 500 steps (float64 agrees to 10⁻¹⁵), at 2–4× PyTorch's time per step.
+[REPORT.md](REPORT.md) has the studies, one question per section. So far:
+- Training on this engine follows PyTorch to within float32 rounding over 500 steps (float64 agrees to 10⁻¹⁵), at 2–4× PyTorch's time per step.
+- At equal compute, byte-level BPE with 512 ids reaches 2.37 validation bits per character, against 2.55 for characters. 1024 ids gave no further gain.
 
 ## Roadmap
 
