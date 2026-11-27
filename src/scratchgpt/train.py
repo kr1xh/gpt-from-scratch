@@ -37,6 +37,10 @@ def parse(argv):
     ap.add_argument("--n-head", type=int, default=4)
     ap.add_argument("--d-model", type=int, default=128)
     ap.add_argument("--block-size", type=int, default=128)
+    ap.add_argument("--norm", choices=["layer", "rms"], default="layer")
+    ap.add_argument("--mlp", choices=["gelu", "swiglu"], default="gelu")
+    ap.add_argument("--pos", choices=["learned", "rope"], default="learned")
+    ap.add_argument("--n-kv-head", type=int, default=None, help="fewer than --n-head: grouped-query attention")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=2e-3)
@@ -98,7 +102,8 @@ def main(argv=None) -> dict:
     text = Path(args.data).read_text(encoding="utf-8") if args.data else data.load_tinyshakespeare()
     tok, train_ids, val_ids = tokenize(text, args)
 
-    cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model)
+    cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model,
+                    norm=args.norm, mlp=args.mlp, pos=args.pos, n_kv_head=args.n_kv_head)
     rng = np.random.default_rng(args.seed)
     model = GPT(cfg, rng=rng)
     params = model.parameters()

@@ -63,3 +63,14 @@ def test_a_finished_run_with_different_settings_is_trained_again(tmp_path, monke
     summary = run(tmp_path, "--steps", "5")  # passed after TINY, so it wins
     assert len(calls) == 2
     assert all(r["variant"] in ("char", "bpe-270") for r in summary["rows"])
+
+
+def test_a_run_saved_before_a_train_option_existed_counts_as_using_its_default(tmp_path, monkeypatch):
+    run(tmp_path)
+    for variant in ("char", "bpe-270"):
+        path = tmp_path / "results" / f"char_vs_bpe-{variant}.json"
+        older = json.loads(path.read_text())
+        del older["args"]["norm"]  # as saved by a version of train.py without --norm
+        path.write_text(json.dumps(older))
+    monkeypatch.setattr(train, "main", lambda *a: pytest.fail("a finished run was retrained"))
+    run(tmp_path)
