@@ -139,6 +139,7 @@ class GPTConfig:
     mlp: str = "gelu"  # "gelu": a 4d GELU MLP; "swiglu": SwiGLU of hidden size 8d/3, about as big
     pos: str = "learned"  # "learned": a position embedding table; "rope": rotary embeddings in attention
     n_kv_head: int | None = None  # fewer key/value heads than query heads: grouped-query attention
+    mlp_hidden: int | None = None  # the MLP's inner width; default 4d (gelu) or 8d/3 (swiglu)
 
     def __post_init__(self):
         for name, allowed in OPTIONS.items():
@@ -211,9 +212,10 @@ class Block(Module):
         self.attn = CausalSelfAttention(d, cfg.n_head, cfg.n_kv_head, rope=cfg.pos == "rope", rng=rng)
         self.ln2 = norm(cfg)
         if cfg.mlp == "swiglu":
-            self.mlp = SwiGLU(d, 8 * d // 3, rng=rng)  # 3 matrices of d x 8d/3 hold as much as 2 of d x 4d
+            # 3 matrices of d x 8d/3 hold as much as the 2 of d x 4d in the GELU MLP
+            self.mlp = SwiGLU(d, cfg.mlp_hidden or 8 * d // 3, rng=rng)
         else:
-            self.mlp = MLP([d, 4 * d, d], activation="gelu", rng=rng)
+            self.mlp = MLP([d, cfg.mlp_hidden or 4 * d, d], activation="gelu", rng=rng)
 
     def forward(self, x: Tensor, cache: KVCache | None = None, layer: int = 0) -> Tensor:
         x = x + self.attn(self.ln1(x), cache, layer)

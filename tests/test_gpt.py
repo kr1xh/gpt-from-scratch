@@ -149,3 +149,8 @@ def test_fewer_kv_heads_shrink_the_key_and_value_projections():
 def test_unknown_options_and_kv_heads_that_do_not_divide_the_heads_are_rejected(bad):
     with pytest.raises(ValueError):
         GPT(replace(SMALL, **bad))
+
+
+@pytest.mark.parametrize("mlp, name", [("gelu", "blocks.0.mlp.layers.0.weight"), ("swiglu", "blocks.0.mlp.up.weight")])
+def test_mlp_hidden_overrides_the_default_width(mlp, name):
+    assert dict(GPT(replace(SMALL, mlp=mlp, mlp_hidden=5)).named_parameters())[name].shape == (8, 5)

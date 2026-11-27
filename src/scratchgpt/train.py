@@ -41,6 +41,7 @@ def parse(argv):
     ap.add_argument("--mlp", choices=["gelu", "swiglu"], default="gelu")
     ap.add_argument("--pos", choices=["learned", "rope"], default="learned")
     ap.add_argument("--n-kv-head", type=int, default=None, help="fewer than --n-head: grouped-query attention")
+    ap.add_argument("--mlp-hidden", type=int, default=None, help="default: 4d for gelu, 8d/3 for swiglu")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=2e-3)
@@ -103,9 +104,12 @@ def main(argv=None) -> dict:
     tok, train_ids, val_ids = tokenize(text, args)
 
     cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model,
-                    norm=args.norm, mlp=args.mlp, pos=args.pos, n_kv_head=args.n_kv_head)
-    rng = np.random.default_rng(args.seed)
-    model = GPT(cfg, rng=rng)
+                    norm=args.norm, mlp=args.mlp, pos=args.pos, n_kv_head=args.n_kv_head,
+                    mlp_hidden=args.mlp_hidden)
+    # separate streams: a model of another size draws more numbers at init, and must still see the
+    # same batches in the same order for the same seed
+    model = GPT(cfg, rng=np.random.default_rng([args.seed, 0]))
+    rng = np.random.default_rng([args.seed, 1])
     params = model.parameters()
     opts = make_optimizers(params, args.lr, args.weight_decay)
     min_lr = args.lr / 10 if args.min_lr is None else args.min_lr

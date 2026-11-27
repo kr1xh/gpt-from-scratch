@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from scratchgpt import sample, train
+from scratchgpt import data, sample, train
 from scratchgpt.nn import GPT
 
 TEXT = "First Citizen:\nBefore we proceed any further, hear me speak.\n" * 40
@@ -162,3 +162,26 @@ def test_modern_block_options_reach_the_model_and_its_checkpoint(tmp_path):
     text = sample.main(["--checkpoint", str(tmp_path / "models" / "tiny.npz"), "--prompt", "First",
                         "--tokens", "20", "--seed", "0"])
     assert text.startswith("First") and len(text) == len("First") + 20
+
+
+def test_the_batches_depend_on_the_seed_not_on_the_model(tmp_path, monkeypatch):
+    seen = {}
+    real = data.get_batch
+
+    def record(ids, batch, block, rng):
+        x, y = real(ids, batch, block, rng)
+        seen.setdefault(width, []).append(x.copy())
+        return x, y
+    monkeypatch.setattr(data, "get_batch", record)
+    for width in ("16", "24"):  # different models draw different amounts of randomness at init
+        run(tmp_path / width, "--steps", "3", "--d-model", width, "--eval-every", "100")
+    assert len(seen["16"]) == len(seen["24"]) > 3
+    for a, b in zip(seen["16"], seen["24"]):
+        np.testing.assert_array_equal(a, b)
+
+
+def test_mlp_hidden_sets_the_width_of_the_mlp(tmp_path):
+    metrics = run(tmp_path, "--steps", "1", "--mlp", "swiglu", "--mlp-hidden", "20")
+    model, _ = sample.load(tmp_path / "models" / "tiny.npz")
+    assert metrics["config"]["mlp_hidden"] == 20
+    assert dict(model.named_parameters())["blocks.0.mlp.gate.weight"].shape == (16, 20)

@@ -16,7 +16,7 @@ import json
 import math
 from pathlib import Path
 
-from scratchgpt import train
+from experiments.runs import train_or_resume
 
 VARIANTS = "char,bpe-256,bpe-512,bpe-1024"
 
@@ -109,16 +109,8 @@ def main(argv=None) -> dict:
     runs = {}
     for variant in args.variants.split(","):
         name = f"char_vs_bpe-{variant}"
-        saved = out / "results" / f"{name}.json"
-        argv_for_run = ["--name", name, "--out-dir", str(out), "--cache-dir", cache,
-                        *variant_args(variant), *passthrough]
-        metrics = json.loads(saved.read_text()) if saved.exists() else {}
-        wanted = vars(train.parse(argv_for_run))
-        # an option that train.py gained after the run was saved counts as left at its default
-        same_settings = "args" in metrics and {**vars(train.parse([])), **metrics["args"]} == wanted
-        if "final" not in metrics or not same_settings:  # not run, stopped early, or other settings
-            metrics = train.main(argv_for_run)
-        runs[variant] = metrics
+        runs[variant] = train_or_resume(["--name", name, "--out-dir", str(out), "--cache-dir", cache,
+                                         *variant_args(variant), *passthrough])
 
     rows = [row(v, m) for v, m in runs.items()]
     summary = {"rows": rows, "passthrough": passthrough}
