@@ -19,9 +19,12 @@ def test_newton_schulz_keeps_the_singular_vectors_and_squeezes_the_singular_valu
     u, s, vt = np.linalg.svd(g, full_matrices=False)
     core = u.T @ optim.newton_schulz(g) @ vt.T  # diagonal if the singular vectors are kept
     np.testing.assert_allclose(core - np.diag(np.diag(core)), 0, atol=1e-8)
-    # the quintic is tuned for speed, not to reach exactly 1: values land around 0.7 to 1.2
-    kept = np.diag(core)[s > 1e-3 * s.max()]
-    assert kept.min() > 0.5 and kept.max() < 1.5
+    # The quintic is tuned for speed, not to reach exactly 1. Values start divided by the Frobenius
+    # norm and grow at most 3.4445x per step, so 5 steps lift every value above about 1.07e-3 of
+    # that norm into [0.5, 1.2] (iterating the scalar polynomial shows this); smaller ones stay low.
+    big = s / np.linalg.norm(g) > 2e-3
+    assert np.diag(core)[big].min() > 0.5 and np.diag(core)[big].max() < 1.21
+    assert np.all(np.diag(core)[~big] < 1.21)
 
 
 def test_newton_schulz_handles_tall_and_wide_matrices_alike():

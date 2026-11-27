@@ -83,7 +83,8 @@ class AdamW(Adam):
 def newton_schulz(g: np.ndarray, steps: int = 5, eps: float = 1e-7) -> np.ndarray:
     """Push every singular value of g towards 1 and keep its singular vectors: roughly U V^T for
     g = U S V^T, from a few steps of an odd quintic matrix polynomial (Jordan et al. 2024). The
-    coefficients buy speed over exactness, so the values land near 1, not on it."""
+    coefficients buy speed over exactness: after 5 steps, singular values above about 1e-3 of g's
+    Frobenius norm land in [0.5, 1.2], and smaller ones are lifted less."""
     a, b, c = 3.4445, -4.7750, 2.0315
     tall = g.shape[0] > g.shape[1]
     x = g.T if tall else g  # iterate on the wide side, where x @ x.T is the smaller matrix
