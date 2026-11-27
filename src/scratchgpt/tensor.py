@@ -169,6 +169,15 @@ class Tensor:
     def __matmul__(self, other):
         other = self._wrap(other)
         a, b = self, other
+        if a.ndim > 2 and b.ndim == 2:
+            # activations (..., K) times a weight (K, N): one large GEMM on (rows, K). NumPy runs
+            # the stacked form as many small products, measured 20x slower for (32, 128, 128) @ (128, 512)
+            a2 = a.data.reshape(-1, a.shape[-1])
+
+            def backward_2d(g):
+                g2 = g.reshape(-1, g.shape[-1])
+                return (g2 @ b.data.T).reshape(a.shape), a2.T @ g2
+            return Tensor._make((a2 @ b.data).reshape(*a.shape[:-1], b.shape[1]), (a, b), backward_2d)
 
         def backward(g):
             return (unbroadcast(g @ np.swapaxes(b.data, -1, -2), a.shape),
@@ -204,12 +213,12 @@ class Tensor:
         """GELU, tanh approximation (as in GPT-2)."""
         x = self.data
         k = np.sqrt(2 / np.pi).astype(x.dtype)
-        inner = k * (x + 0.044715 * x ** 3)
-        t = np.tanh(inner)
+        x2 = x * x  # x * x * x, not x ** 3: NumPy's general pow was 5x slower here
+        t = np.tanh(k * x * (1 + 0.044715 * x2))
         out = 0.5 * x * (1 + t)
 
         def backward(g):
-            return (g * (0.5 * (1 + t) + 0.5 * x * (1 - t * t) * k * (1 + 3 * 0.044715 * x * x)),)
+            return (g * (0.5 * (1 + t) + 0.5 * x * (1 - t * t) * k * (1 + 3 * 0.044715 * x2)),)
         return Tensor._make(out, (self,), backward)
 
     def silu(self):
@@ -266,10 +275,15 @@ class Tensor:
     def __getitem__(self, idx):
         idx = idx.data.astype(np.int64) if isinstance(idx, Tensor) else idx
         shape, dtype = self.shape, self.data.dtype
+        parts = idx if isinstance(idx, tuple) else (idx,)
+        basic = all(isinstance(i, (int, np.integer, slice)) or i is None or i is Ellipsis for i in parts)
 
         def backward(g):
             full = np.zeros(shape, dtype=dtype)
-            np.add.at(full, idx, g)  # repeated indices (e.g. the same token twice) add up
+            if basic:  # ints and slices pick each element at most once: plain assignment is enough
+                full[idx] = g
+            else:
+                np.add.at(full, idx, g)  # repeated indices (e.g. the same token twice) add up
             return (full,)
         return Tensor._make(self.data[idx], (self,), backward)
 
