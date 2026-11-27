@@ -5,7 +5,7 @@ only the tokenizer changes (characters, or byte-level BPE with 256, 512 or 1024 
 token cannot be compared across tokenizers, so each run is scored in bits per byte of the whole
 validation split (for ASCII TinyShakespeare, bits per character); see scratchgpt.evaluate.
 
-    python -m experiments.char_vs_bpe     # about 3 hours: run it overnight
+    python -m experiments.char_vs_bpe     # about 1.5 hours on a 4-core CPU
 
 Runs are resumable: a variant whose results already hold a final score is not trained again.
 Writes results/char_vs_bpe-<variant>.json per run, results/char_vs_bpe.json and
@@ -62,12 +62,18 @@ def plot(runs: dict, rows: list, path: Path) -> None:
     # during training: eval loss (nats per token, sampled batches) turned into bits per byte with
     # each tokenizer's measured bytes per token; the exact whole-split score is on the right
     left.grid(True, color=GRID, linewidth=0.8)
+    ends = []
     for (variant, metrics), r, color in zip(runs.items(), rows, COLORS):
         steps = [e["step"] for e in metrics["evals"]]
         bpb = [e["val_loss"] / math.log(2) / r["bytes_per_token"] for e in metrics["evals"]]
         left.plot(steps, bpb, color=color, linewidth=2, marker="o", markersize=4, label=variant)
-        left.annotate(variant, (steps[-1], bpb[-1]), xytext=(5, 0), textcoords="offset points",
-                      color=INK, fontsize=9, va="center")
+        ends.append((bpb[-1], variant, steps[-1]))
+    lo, hi = left.get_ylim()
+    gap, previous = 0.05 * (hi - lo), -math.inf
+    for y, variant, x in sorted(ends):  # curves end close together: spread their labels apart
+        previous = max(y, previous + gap)
+        left.annotate(variant, (x, y), xytext=(x + 40, previous), textcoords="data",
+                      color=INK, fontsize=9, va="center", annotation_clip=False)
     left.set_title("Validation bits per character during training", color=INK, fontsize=11, loc="left")
     left.set_xlabel("step (same tokens per step for every variant)", color=INK_2, fontsize=9)
     left.set_ylabel("bits per character (estimated)", color=INK_2, fontsize=9)
