@@ -55,7 +55,17 @@ def matched_hidden(argv: list[str], target: int) -> int:
     return max(1, round(1 + (target - one) / (two - one)))
 
 
-INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
+def summarize(runs: list) -> list:
+    """Per variant, in order of first appearance: the number of seeds, the mean score and its range."""
+    variants = []
+    for variant in dict.fromkeys(r["variant"] for r in runs):
+        scores = [r["val_bits_per_byte"] for r in runs if r["variant"] == variant]
+        variants.append({"variant": variant, "n": len(scores), "mean": sum(scores) / len(scores),
+                         "low": min(scores), "high": max(scores)})
+    return variants
+
+
+INK, INK_2, GRID, SURFACE ="#0b0b0b", "#52514e", "#e4e3df", "#fcfcfb"
 BLUE, ORANGE, BAND = "#2a78d6", "#eb6834", "#e9eef6"
 
 
@@ -142,11 +152,7 @@ def main(argv=None) -> dict:
             if seed == 0:
                 curves[variant] = metrics
 
-    variants = []
-    for variant in dict.fromkeys(r["variant"] for r in runs):
-        scores = [r["val_bits_per_byte"] for r in runs if r["variant"] == variant]
-        variants.append({"variant": variant, "n": len(scores), "mean": sum(scores) / len(scores),
-                         "low": min(scores), "high": max(scores)})
+    variants = summarize(runs)
     summary = {"runs": runs, "variants": variants, "passthrough": passthrough}
     (out / "results" / "modern_block.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     plot(curves, runs, variants, out / "docs" / "figures" / "modern_block.png")

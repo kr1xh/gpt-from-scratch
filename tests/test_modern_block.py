@@ -44,6 +44,24 @@ def test_one_row_per_run_and_repeated_seeds_for_the_two_main_blocks(tmp_path):
     assert (tmp_path / "docs" / "figures" / "modern_block.png").stat().st_size > 1000
 
 
+def test_each_run_trains_with_its_own_seed_and_its_variant_s_options(tmp_path):
+    summary = run(tmp_path)
+    for r in summary["runs"]:
+        saved = json.loads((tmp_path / "results" / f"modern_block-{r['variant']}-s{r['seed']}.json").read_text())
+        cfg = saved["config"]
+        assert saved["args"]["seed"] == r["seed"] and cfg["mlp_hidden"] == r["mlp_hidden"]
+        assert (cfg["norm"], cfg["mlp"], cfg["pos"], cfg["n_kv_head"]) == {
+            "gpt2": ("layer", "gelu", "learned", None), "gqa": ("layer", "gelu", "learned", 1),
+            "modern": ("rms", "swiglu", "rope", 1)}[r["variant"]]
+
+
+def test_variant_summaries_hold_the_mean_and_range_over_seeds():
+    runs = [{"variant": "a", "val_bits_per_byte": x} for x in (2.5, 2.3, 2.7)] + \
+           [{"variant": "b", "val_bits_per_byte": 2.0}]
+    assert study.summarize(runs) == [{"variant": "a", "n": 3, "mean": pytest.approx(2.5), "low": 2.3, "high": 2.7},
+                                     {"variant": "b", "n": 1, "mean": 2.0, "low": 2.0, "high": 2.0}]
+
+
 def test_finished_runs_are_not_trained_again(tmp_path, monkeypatch):
     first = run(tmp_path)
     monkeypatch.setattr(train, "main", lambda *a: pytest.fail("a finished run was retrained"))
