@@ -194,3 +194,10 @@ def test_the_optimizer_option_changes_the_updates_not_the_start(tmp_path, optimi
     assert other["args"]["optimizer"] == optimizer
     assert other["train_loss"][0] == adamw[0]  # same weights and batch before any update
     assert other["train_loss"][1:] != adamw[1:]
+
+
+def test_momentum_is_not_plain_sgd(tmp_path):
+    sgd = run(tmp_path / "sgd", "--steps", "4", "--optimizer", "sgd")["train_loss"]
+    momentum = run(tmp_path / "momentum", "--steps", "4", "--optimizer", "momentum")["train_loss"]
+    # Nesterov momentum already looks ahead on the first update, so the runs part from step 1 on
+    assert sgd[0] == momentum[0] and sgd[1:] != momentum[1:]
