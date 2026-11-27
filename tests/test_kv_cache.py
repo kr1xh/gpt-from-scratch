@@ -9,6 +9,8 @@ CONFIGS = {
     "gpt2": GPTConfig(vocab_size=17, block_size=12, n_layer=2, n_head=4, d_model=16),
     "modern": GPTConfig(vocab_size=17, block_size=12, n_layer=2, n_head=4, d_model=16,
                         norm="rms", mlp="swiglu", pos="rope", n_kv_head=2),
+    "moe": GPTConfig(vocab_size=17, block_size=12, n_layer=2, n_head=4, d_model=16,
+                     norm="rms", mlp="swiglu", pos="rope", n_kv_head=2, n_expert=4, top_k=2),
 }
 
 

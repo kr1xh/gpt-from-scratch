@@ -19,7 +19,32 @@ def rope(x, offset=0, base=10000.0):
     return torch.cat([z.real, z.imag], dim=-1)
 
 
-def forward(P: dict, cfg, idx, targets=None):
+def mlp(P, cfg, h, name):
+    if cfg.mlp == "swiglu":
+        g = F.silu(h @ P[f"{name}.gate.weight"] + P[f"{name}.gate.bias"]) * (h @ P[f"{name}.up.weight"] + P[f"{name}.up.bias"])
+        return g @ P[f"{name}.down.weight"] + P[f"{name}.down.bias"]
+    g = F.gelu(h @ P[f"{name}.layers.0.weight"] + P[f"{name}.layers.0.bias"], approximate="tanh")
+    return g @ P[f"{name}.layers.1.weight"] + P[f"{name}.layers.1.bias"]
+
+
+def moe(P, cfg, h, name):
+    """Top-k routing with torch.topk, gates by softmax over the chosen scores, experts gathered
+    and added back with index_add; returns the output and the Switch load-balancing loss."""
+    flat = h.reshape(-1, h.shape[-1])
+    scores = flat @ P[f"{name}.router.weight"]
+    top_scores, chosen = scores.topk(cfg.top_k, dim=-1)
+    gates = F.softmax(top_scores, dim=-1)
+    out = torch.zeros_like(flat)
+    for e in range(cfg.n_expert):
+        tok, slot = torch.nonzero(chosen == e, as_tuple=True)
+        out = out.index_add(0, tok, mlp(P, cfg, flat[tok], f"{name}.experts.{e}") * gates[tok, slot, None])
+    share = torch.bincount(chosen.flatten(), minlength=cfg.n_expert).to(scores.dtype) / chosen.numel()
+    aux = cfg.n_expert * (F.softmax(scores, dim=-1).mean(0) * share).sum()
+    return out.reshape(h.shape), aux
+
+
+def forward(P: dict, cfg, idx, targets=None, with_aux=False):
+    """Returns (logits, loss), or (logits, loss, summed load-balancing loss) with with_aux."""
     B, T = idx.shape
     C, H = cfg.d_model, cfg.n_head
     KV = cfg.n_kv_head or H
@@ -31,6 +56,7 @@ def forward(P: dict, cfg, idx, targets=None):
         return F.layer_norm(x, (C,), P[f"{name}.weight"], P[f"{name}.bias"])
 
     x = P["wte.weight"][idx]
+    aux = None
     if cfg.pos == "learned":
         x = x + P["wpe.weight"][:T]
     for i in range(cfg.n_layer):
@@ -45,17 +71,16 @@ def forward(P: dict, cfg, idx, targets=None):
         a = F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=KV < H)
         x = x + a.transpose(1, 2).reshape(B, T, C) @ p("attn.proj.weight") + p("attn.proj.bias")
         h = norm(x, f"blocks.{i}.ln2")
-        if cfg.mlp == "swiglu":
-            h = F.silu(h @ p("mlp.gate.weight") + p("mlp.gate.bias")) * (h @ p("mlp.up.weight") + p("mlp.up.bias"))
-            x = x + h @ p("mlp.down.weight") + p("mlp.down.bias")
+        if cfg.n_expert:
+            h, layer_aux = moe(P, cfg, h, f"blocks.{i}.mlp")
+            aux = layer_aux if aux is None else aux + layer_aux
+            x = x + h
         else:
-            h = F.gelu(h @ p("mlp.layers.0.weight") + p("mlp.layers.0.bias"), approximate="tanh")
-            x = x + h @ p("mlp.layers.1.weight") + p("mlp.layers.1.bias")
+            x = x + mlp(P, cfg, h, f"blocks.{i}.mlp")
     x = norm(x, "ln_f")
     logits = x @ P["wte.weight"].T  # the output head is tied to the token embedding
-    if targets is None:
-        return logits, None
-    return logits, F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+    loss = None if targets is None else F.cross_entropy(logits.reshape(-1, logits.shape[-1]), targets.reshape(-1))
+    return (logits, loss, aux) if with_aux else (logits, loss)
 
 
 def parameters(state: dict, dtype=torch.float32) -> dict:

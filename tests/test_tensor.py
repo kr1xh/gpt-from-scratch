@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from gradcheck import RNG, check, rand
-from scratchgpt.tensor import Tensor, concat, no_grad, where
+from scratchgpt.tensor import Tensor, concat, no_grad, scatter_add, where
 
 
 BINARY = [
@@ -188,3 +188,10 @@ def test_leaf_gradients_are_independent_writeable_arrays():
     assert a.grad is not b.grad
     a.grad *= 0.5  # optimizers and clipping update gradients in place
     np.testing.assert_allclose(b.grad, [1.0, 1.0, 1.0])
+
+
+def test_scatter_add_matches_torch_index_add_with_repeated_rows():
+    index = np.array([3, 0, 3, 1])  # row 3 receives two sources; row 2 none
+    check(lambda src: scatter_add(index, src, 5),
+          lambda src: torch.zeros(5, 2, dtype=torch.float64).index_add(0, torch.tensor(index), src),
+          rand(4, 2))

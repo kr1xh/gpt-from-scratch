@@ -318,3 +318,12 @@ def where(cond, a, b) -> Tensor:
     def backward(g):
         return (unbroadcast(np.where(cond, g, 0), a.shape), unbroadcast(np.where(cond, 0, g), b.shape))
     return Tensor._make(np.where(cond, a.data, b.data), (a, b), backward)
+
+
+def scatter_add(index, src: Tensor, n: int) -> Tensor:
+    """An (n, ...) tensor whose row index[i] is the sum of every src[i] sent to it (rows nobody
+    sends to stay zero), like torch's index_add on zeros. Its gradient for src[i] is row index[i]."""
+    index = np.asarray(index)
+    out = np.zeros((n,) + src.shape[1:], dtype=src.data.dtype)
+    np.add.at(out, index, src.data)
+    return Tensor._make(out, (src,), lambda g: (g[index],))

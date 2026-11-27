@@ -42,6 +42,9 @@ def parse(argv):
     ap.add_argument("--pos", choices=["learned", "rope"], default="learned")
     ap.add_argument("--n-kv-head", type=int, default=None, help="fewer than --n-head: grouped-query attention")
     ap.add_argument("--mlp-hidden", type=int, default=None, help="default: 4d for gelu, 8d/3 for swiglu")
+    ap.add_argument("--n-expert", type=int, default=0, help="0: dense; otherwise a mixture of experts per block")
+    ap.add_argument("--top-k", type=int, default=2, help="experts per token")
+    ap.add_argument("--moe-aux", type=float, default=0.01, help="weight of the load-balancing loss")
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--steps", type=int, default=1500)
     ap.add_argument("--lr", type=float, default=2e-3)
@@ -125,7 +128,7 @@ def main(argv=None) -> dict:
 
     cfg = GPTConfig(tok.vocab_size, args.block_size, args.n_layer, args.n_head, args.d_model,
                     norm=args.norm, mlp=args.mlp, pos=args.pos, n_kv_head=args.n_kv_head,
-                    mlp_hidden=args.mlp_hidden)
+                    mlp_hidden=args.mlp_hidden, n_expert=args.n_expert, top_k=args.top_k)
     # separate streams: a model of another size draws more numbers at init, and must still see the
     # same batches in the same order for the same seed
     model = GPT(cfg, rng=np.random.default_rng([args.seed, 0]))
@@ -149,7 +152,8 @@ def main(argv=None) -> dict:
         x, y = data.get_batch(train_ids, args.batch_size, args.block_size, rng)
         model.zero_grad()
         _, loss = model(x, y)
-        loss.backward()
+        aux = model.aux_loss()
+        (loss + args.moe_aux * aux if aux is not None else loss).backward()  # the logged loss stays the cross-entropy
         optim.clip_grad_norm(params, args.grad_clip)
         for opt in opts:
             opt.step()
@@ -164,6 +168,8 @@ def main(argv=None) -> dict:
             row = {"step": step, "train_loss": estimate_loss(model, train_ids, args, eval_rng),
                    "val_loss": estimate_loss(model, val_ids, args, eval_rng), "lr": lr,
                    "seconds": round(time.perf_counter() - start, 2)}
+            if cfg.n_expert:  # share of assignments per expert, per layer, on the last validation batch
+                row["expert_load"] = [load.tolist() for load in model.expert_load()]
             metrics["evals"].append(row)
             print(f"step {step:5d}  train {row['train_loss']:.4f}  val {row['val_loss']:.4f}  "
                   f"lr {lr:.2e}  {row['seconds']:.0f}s", flush=True)

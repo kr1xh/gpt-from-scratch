@@ -210,3 +210,18 @@ def test_a_run_whose_loss_blows_up_stops_and_says_where(tmp_path):
     assert metrics["diverged_at"] == len(metrics["train_loss"]) - 1 < 49
     assert not math.isfinite(metrics["train_loss"][-1])
     assert not math.isfinite(metrics["final"]["val_bits_per_byte"])
+
+
+def test_moe_runs_record_the_expert_load_at_every_eval(tmp_path):
+    metrics = run(tmp_path, "--steps", "21", "--mlp", "swiglu", "--n-expert", "4", "--top-k", "2")
+    assert metrics["config"]["n_expert"] == 4
+    for row in metrics["evals"]:
+        assert len(row["expert_load"]) == 1 and len(row["expert_load"][0]) == 4
+        assert sum(row["expert_load"][0]) == pytest.approx(1.0)
+
+
+def test_the_load_balancing_weight_changes_the_updates(tmp_path):
+    moe = ["--steps", "3", "--mlp", "swiglu", "--n-expert", "4"]
+    plain = run(tmp_path / "a", *moe, "--moe-aux", "0")["train_loss"]
+    balanced = run(tmp_path / "b", *moe, "--moe-aux", "1")["train_loss"]
+    assert plain[0] == balanced[0] and plain[1:] != balanced[1:]  # the logged loss is the cross-entropy

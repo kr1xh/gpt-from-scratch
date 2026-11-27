@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from . import functional as F
-from .tensor import Tensor, concat
+from .tensor import Tensor, concat, scatter_add
 
 
 class Module:
@@ -140,11 +140,15 @@ class GPTConfig:
     pos: str = "learned"  # "learned": a position embedding table; "rope": rotary embeddings in attention
     n_kv_head: int | None = None  # fewer key/value heads than query heads: grouped-query attention
     mlp_hidden: int | None = None  # the MLP's inner width; default 4d (gelu) or 8d/3 (swiglu)
+    n_expert: int = 0  # 0: one dense MLP per block; otherwise a mixture of n_expert MLPs of the kind above
+    top_k: int = 2  # experts each token is sent to
 
     def __post_init__(self):
         for name, allowed in OPTIONS.items():
             if getattr(self, name) not in allowed:
                 raise ValueError(f"{name}={getattr(self, name)!r}: use one of {', '.join(allowed)}")
+        if self.n_expert and not (self.n_expert >= 2 and 1 <= self.top_k <= self.n_expert):
+            raise ValueError(f"n_expert={self.n_expert}, top_k={self.top_k}: need 2+ experts and 1 <= top_k <= n_expert")
         kv = self.n_head if self.n_kv_head is None else self.n_kv_head
         if kv < 1 or self.n_head % kv:
             raise ValueError(f"n_kv_head={self.n_kv_head} must divide n_head={self.n_head}")
@@ -199,6 +203,46 @@ class CausalSelfAttention(Module):
         return self.proj(out)
 
 
+def make_mlp(cfg: GPTConfig, rng=None) -> Module:
+    d = cfg.d_model
+    if cfg.mlp == "swiglu":  # 3 matrices of d x 8d/3 hold as much as the 2 of d x 4d in the GELU MLP
+        return SwiGLU(d, cfg.mlp_hidden or 8 * d // 3, rng=rng)
+    return MLP([d, cfg.mlp_hidden or 4 * d, d], activation="gelu", rng=rng)
+
+
+class MoE(Module):
+    """A router sends each token to its top_k of n_expert MLPs, and the token gets their outputs
+    weighted by a softmax over the chosen router scores (Shazeer et al. 2017; Mixtral). Each expert
+    runs only on the tokens sent to it. After a forward, stats holds the Switch Transformer
+    load-balancing loss (Fedus et al. 2021) and each expert's share of the assignments."""
+
+    def __init__(self, cfg: GPTConfig, rng=None):
+        self.router = Linear(cfg.d_model, cfg.n_expert, bias=False, rng=rng)
+        self.experts = [make_mlp(cfg, rng) for _ in range(cfg.n_expert)]
+        self.top_k = cfg.top_k
+        self.stats = {}  # a dict, so the aux loss in it is not mistaken for a parameter
+
+    def forward(self, x: Tensor) -> Tensor:
+        B, T, C = x.shape
+        N, E = B * T, len(self.experts)
+        flat = x.reshape(N, C)
+        scores = self.router(flat)  # (N, E)
+        chosen = np.argsort(-scores.data, axis=-1, kind="stable")[:, :self.top_k]  # (N, k), best first
+        gates = F.softmax(scores[np.arange(N)[:, None], chosen], axis=-1)  # (N, k)
+        outputs, rows = [], []
+        for e, expert in enumerate(self.experts):
+            tok, slot = np.nonzero(chosen == e)
+            if tok.size:
+                outputs.append(expert(flat[tok]) * gates[tok, slot].reshape(-1, 1))
+                rows.append(tok)
+        out = scatter_add(np.concatenate(rows), concat(outputs, axis=0), N)
+        # E * sum_e share_e * mean router probability_e: 1 when both are uniform, E when one expert takes
+        # everything. The share is a count (no gradient); the probabilities carry it to the router.
+        share = np.bincount(chosen.ravel(), minlength=E) / chosen.size
+        self.stats = {"aux_loss": (F.softmax(scores, axis=-1).mean(axis=0) * share).sum() * E, "load": share}
+        return out.reshape(B, T, C)
+
+
 def norm(cfg: GPTConfig) -> Module:
     return RMSNorm(cfg.d_model) if cfg.norm == "rms" else LayerNorm(cfg.d_model)
 
@@ -211,11 +255,7 @@ class Block(Module):
         self.ln1 = norm(cfg)
         self.attn = CausalSelfAttention(d, cfg.n_head, cfg.n_kv_head, rope=cfg.pos == "rope", rng=rng)
         self.ln2 = norm(cfg)
-        if cfg.mlp == "swiglu":
-            # 3 matrices of d x 8d/3 hold as much as the 2 of d x 4d in the GELU MLP
-            self.mlp = SwiGLU(d, cfg.mlp_hidden or 8 * d // 3, rng=rng)
-        else:
-            self.mlp = MLP([d, cfg.mlp_hidden or 4 * d, d], activation="gelu", rng=rng)
+        self.mlp = MoE(cfg, rng=rng) if cfg.n_expert else make_mlp(cfg, rng=rng)
 
     def forward(self, x: Tensor, cache: KVCache | None = None, layer: int = 0) -> Tensor:
         x = x + self.attn(self.ln1(x), cache, layer)
@@ -238,12 +278,19 @@ class GPT(Module):
         # residual stream get 0.02 / sqrt(2 * n_layer), so the stream does not grow with depth
         residual_std = 0.02 / np.sqrt(2 * cfg.n_layer)
         for block in self.blocks:
-            mlp = block.mlp
-            mlp_layers = mlp.layers if isinstance(mlp, MLP) else [mlp.gate, mlp.up, mlp.down]
-            for layer in (block.attn.qkv, block.attn.proj, *mlp_layers):
-                std = residual_std if layer is block.attn.proj or layer is mlp_layers[-1] else 0.02
+            mlps = block.mlp.experts if isinstance(block.mlp, MoE) else [block.mlp]
+            layers, into_residual = [block.attn.qkv, block.attn.proj], [block.attn.proj]
+            for mlp in mlps:
+                own = mlp.layers if isinstance(mlp, MLP) else [mlp.gate, mlp.up, mlp.down]
+                layers += own
+                into_residual.append(own[-1])
+            if isinstance(block.mlp, MoE):
+                layers.append(block.mlp.router)
+            for layer in layers:
+                std = residual_std if any(layer is r for r in into_residual) else 0.02
                 layer.weight.data = rng.normal(0, std, layer.weight.shape).astype(np.float32)
-                layer.bias.data = np.zeros_like(layer.bias.data)
+                if layer.bias is not None:
+                    layer.bias.data = np.zeros_like(layer.bias.data)
 
     def forward(self, idx, targets=None, cache: KVCache | None = None):
         idx = np.asarray(idx)
@@ -261,3 +308,21 @@ class GPT(Module):
         logits = self.ln_f(x) @ self.wte.weight.T
         loss = F.cross_entropy(logits, targets) if targets is not None else None
         return logits, loss
+
+    def _moe_layers(self):
+        return [b.mlp for b in self.blocks if isinstance(b.mlp, MoE)]
+
+    def aux_loss(self):
+        """The load-balancing loss of the last forward, summed over MoE layers; None for a dense
+        model. Training adds it, scaled, to the cross-entropy that forward returns."""
+        layers = self._moe_layers()
+        if not layers:
+            return None
+        total = layers[0].stats["aux_loss"]
+        for layer in layers[1:]:
+            total = total + layer.stats["aux_loss"]
+        return total
+
+    def expert_load(self) -> list:
+        """Each MoE layer's share of the last forward's assignments, per expert."""
+        return [layer.stats["load"] for layer in self._moe_layers()]
