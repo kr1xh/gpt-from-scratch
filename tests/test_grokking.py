@@ -28,6 +28,7 @@ def test_the_split_depends_only_on_the_seed():
 def test_first_step_finds_where_a_curve_reaches_a_threshold():
     history = [{"step": s, "test_acc": acc} for s, acc in ((0, 0.0), (10, 0.5), (20, 0.995), (30, 1.0))]
     assert grokking.first_step(history, "test_acc", 0.99) == 20
+    assert grokking.first_step(history, "test_acc", 0.5) == 10  # reaching the threshold is enough
     assert grokking.first_step(history, "test_acc", 1.01) is None
 
 
