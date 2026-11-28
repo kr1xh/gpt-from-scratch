@@ -5,6 +5,19 @@ from pathlib import Path
 from scratchgpt import train
 
 
+def cached(path: Path, settings: dict, compute):
+    """compute() and save its result with its settings, unless `path` already holds a result saved
+    with exactly these settings; either way return the result."""
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        if saved.get("settings") == settings:
+            return saved["result"]
+    result = compute()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"settings": settings, "result": result}, indent=1), encoding="utf-8")
+    return result
+
+
 def train_or_resume(argv: list[str]) -> dict:
     """Return the metrics of `python -m scratchgpt.train <argv>`. If results/<name>.json under
     --out-dir already holds a finished run (with its final score) and the same settings, it is
