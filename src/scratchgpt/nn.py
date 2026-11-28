@@ -179,6 +179,8 @@ class CausalSelfAttention(Module):
         if d_model % n_head:
             raise ValueError(f"d_model={d_model} is not divisible by n_head={n_head}")
         self.n_head, self.n_kv_head, self.rope = n_head, n_kv_head or n_head, rope
+        # inspection hooks (scratchgpt.interp): keep the last attention weights, zero chosen heads
+        self.record, self.last_weights, self.ablated_heads = False, None, ()
         self.qkv = Linear(d_model, d_model + 2 * self.n_kv_head * (d_model // n_head), rng=rng)
         self.proj = Linear(d_model, d_model, rng=rng)
 
@@ -199,7 +201,14 @@ class CausalSelfAttention(Module):
         Tk = k.shape[2]  # the new queries are the last T of the Tk positions
         future = np.arange(Tk)[None, :] > np.arange(Tk - T, Tk)[:, None]
         weights = F.softmax(scores.masked_fill(future, -1e9), axis=-1)
-        out = (weights @ v).transpose(0, 2, 1, 3).reshape(B, T, C)
+        if self.record:
+            self.last_weights = weights.data
+        heads = weights @ v  # (B, H, T, head size)
+        if self.ablated_heads:
+            keep = np.ones((1, H, 1, 1), dtype=heads.data.dtype)
+            keep[:, list(self.ablated_heads)] = 0
+            heads = heads * keep
+        out = heads.transpose(0, 2, 1, 3).reshape(B, T, C)
         return self.proj(out)
 
 
